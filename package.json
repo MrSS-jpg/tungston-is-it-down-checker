@@ -1,0 +1,12 @@
+{
+  "name": "tungston-is-it-down-checker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tungston Is It Down Checker - check if a website is reachable, with an AI-generated summary via Groq.",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

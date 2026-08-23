@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tungston — Is It Down Checker</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="background-blobs">
+    <span class="blob blob-1"></span>
+    <span class="blob blob-2"></span>
+    <span class="blob blob-3"></span>
+  </div>
+
+  <main class="card">
+    <h1>Tungston</h1>
+    <p class="subtitle">Is It Down Checker</p>
+
+    <form id="check-form">
+      <input
+        type="text"
+        id="url-input"
+        placeholder="example.com or https://example.com"
+        autocomplete="off"
+        required
+      />
+      <button type="submit" id="check-btn">Check</button>
+    </form>
+
+    <div id="result" class="result hidden"></div>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
