@@ -61,3 +61,10 @@ function escapeHtml(str) {
   div.textContent = str;
   return div.innerHTML;
 }
+
+const themeToggle = document.getElementById("theme-toggle");
+themeToggle.addEventListener("click", () => {
+  document.body.classList.toggle("light");
+  const isLight = document.body.classList.contains("light");
+  themeToggle.textContent = isLight ? "🌙 Dark Mode" : "☀️ Light Mode";
+});

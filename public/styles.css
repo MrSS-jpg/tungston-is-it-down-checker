@@ -177,3 +177,67 @@ body {
   font-style: italic;
   color: var(--text-main);
 }
+
+/* Light Mode */
+body.light {
+  background: linear-gradient(135deg, #e0e7ff, #f8fafc 60%, #e0e7ff);
+}
+body.light .card {
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+  color: #0f172a;
+}
+body.light .card h1 {
+  background: linear-gradient(90deg, #6d28d9, #0891b2);
+  -webkit-background-clip: text;
+}
+body.light .subtitle {
+  color: rgba(15, 23, 42, 0.7);
+}
+body.light #url-input {
+  background: rgba(255, 255, 255, 0.9);
+  color: #0f172a;
+  border-color: rgba(0, 0, 0, 0.1);
+}
+body.light #url-input::placeholder {
+  color: rgba(15, 23, 42, 0.5);
+}
+body.light .result {
+  background: rgba(255, 255, 255, 0.8);
+  border-color: rgba(0, 0, 0, 0.1);
+}
+body.light .result .meta {
+  color: rgba(15, 23, 42, 0.7);
+}
+body.light .result .ai-summary {
+  color: #0f172a;
+}
+body.light .blob-1 { background: #c4b5fd; opacity: 0.8; }
+body.light .blob-2 { background: #67e8f9; opacity: 0.8; }
+body.light .blob-3 { background: #f9a8d4; opacity: 0.8; }
+
+.theme-toggle {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: var(--text-main);
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  z-index: 10;
+  backdrop-filter: blur(10px);
+  font-family: inherit;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+body.light .theme-toggle {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #0f172a;
+}
+.theme-toggle:hover {
+  transform: scale(1.05);
+}
