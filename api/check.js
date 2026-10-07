@@ -1,17 +1,12 @@
 // api/check.js
-// This runs on Vercel's server, NOT in the browser.
-// The GROQ_API_KEY only ever lives here, as an environment variable.
-// The browser never sees it.
+// Runs on Vercel's server. Protected with multi-layer SSRF validation,
+// Edge/browser cache-control, in-memory deduplication, and Groq AI diagnosis.
 
 const dns = require("dns").promises;
 
-// ---------- very small in-memory rate limiter ----------
-// Note: on Vercel each serverless instance has its own memory, and cold
-// starts wipe it. This stops a single abusive burst from one instance,
-// it is NOT a substitute for a real rate limiter (see README for the
-// Upstash/Vercel Firewall note if you want to harden this further).
+// ---------- rate limiter ----------
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_REQUESTS = 15;
+const RATE_LIMIT_MAX_REQUESTS = 20;
 const requestLog = new Map(); // ip -> [timestamps]
 
 function isRateLimited(ip) {
@@ -19,17 +14,46 @@ function isRateLimited(ip) {
   const timestamps = (requestLog.get(ip) || []).filter(
     (t) => now - t < RATE_LIMIT_WINDOW_MS
   );
+  if (timestamps.length >= RATE_LIMIT_MAX_REQUESTS) {
+    requestLog.set(ip, timestamps);
+    return true;
+  }
   timestamps.push(now);
   requestLog.set(ip, timestamps);
-  return timestamps.length > RATE_LIMIT_MAX_REQUESTS;
+  if (requestLog.size > 2000) {
+    for (const [k, v] of requestLog.entries()) {
+      const active = v.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+      if (active.length) requestLog.set(k, active);
+      else requestLog.delete(k);
+    }
+  }
+  return false;
+}
+
+// ---------- 60s in-memory response cache ----------
+// Prevents duplicate DNS queries and duplicate Groq AI invocations for frequent checks.
+const CACHE_TTL_MS = 60_000;
+const checkCache = new Map(); // urlString -> { data, timestamp }
+
+function getCached(url) {
+  const hit = checkCache.get(url);
+  if (hit && Date.now() - hit.timestamp < CACHE_TTL_MS) {
+    return hit.data;
+  }
+  return null;
+}
+
+function setCached(url, data) {
+  checkCache.set(url, { data, timestamp: Date.now() });
+  if (checkCache.size > 1000) {
+    const now = Date.now();
+    for (const [k, v] of checkCache.entries()) {
+      if (now - v.timestamp >= CACHE_TTL_MS) checkCache.delete(k);
+    }
+  }
 }
 
 // ---------- SSRF protection ----------
-// Without this, someone could ask your server to "check" http://169.254.169.254
-// or http://localhost:6379 and use YOUR server to probe internal/cloud
-// metadata services. We block that at two layers: hostname text, and the
-// actual resolved IP address (to stop DNS-rebinding tricks).
-
 const BLOCKED_HOSTNAMES = new Set([
   "localhost",
   "0.0.0.0",
@@ -76,8 +100,7 @@ async function assertUrlIsSafe(rawUrl) {
     throw new Error("That host isn't allowed.");
   }
 
-  // Resolve DNS ourselves and check the actual IP, so someone can't hide
-  // a private IP behind a public-looking domain name.
+  // Resolve DNS ourselves and check actual IP to prevent DNS rebinding tricks
   let addresses;
   try {
     addresses = await dns.lookup(hostname, { all: true });
@@ -94,50 +117,76 @@ async function assertUrlIsSafe(rawUrl) {
   return parsed;
 }
 
-// ---------- the actual reachability check ----------
-async function checkReachability(url) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+// ---------- safe reachability check with redirect protection ----------
+async function checkReachability(initialUrl) {
+  let currentUrl = initialUrl;
+  let hops = 0;
+  const maxHops = 3;
   const start = Date.now();
 
-  try {
-    // Try a lightweight HEAD request first.
-    let response = await fetch(url, {
-      method: "HEAD",
-      redirect: "follow",
-      signal: controller.signal,
-    });
+  while (hops <= maxHops) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);
 
-    // Some servers reject HEAD (405/501) - fall back to GET.
-    if (response.status === 405 || response.status === 501) {
-      response = await fetch(url, {
-        method: "GET",
-        redirect: "follow",
+    try {
+      // Use manual redirect to inspect each hop and prevent SSRF redirect bypass
+      let response = await fetch(currentUrl, {
+        method: "HEAD",
+        redirect: "manual",
         signal: controller.signal,
       });
-    }
 
-    return {
-      reachable: response.ok || (response.status >= 200 && response.status < 400),
-      statusCode: response.status,
-      latencyMs: Date.now() - start,
-    };
-  } catch (err) {
-    return {
-      reachable: false,
-      statusCode: null,
-      latencyMs: Date.now() - start,
-      error: err.name === "AbortError" ? "Timed out after 8 seconds" : err.message,
-    };
-  } finally {
-    clearTimeout(timeout);
+      if (response.status === 405 || response.status === 501) {
+        response = await fetch(currentUrl, {
+          method: "GET",
+          redirect: "manual",
+          signal: controller.signal,
+        });
+      }
+
+      clearTimeout(timeout);
+
+      // Handle Redirect safely
+      if ([301, 302, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location");
+        if (location && hops < maxHops) {
+          const nextUrl = new URL(location, currentUrl).toString();
+          // Validate redirect destination against SSRF!
+          await assertUrlIsSafe(nextUrl);
+          currentUrl = nextUrl;
+          hops++;
+          continue;
+        }
+      }
+
+      return {
+        reachable: response.ok || (response.status >= 200 && response.status < 400),
+        statusCode: response.status,
+        latencyMs: Date.now() - start,
+      };
+    } catch (err) {
+      clearTimeout(timeout);
+      return {
+        reachable: false,
+        statusCode: null,
+        latencyMs: Date.now() - start,
+        error: err.name === "AbortError" ? "Timed out after 7 seconds" : err.message,
+      };
+    }
   }
+
+  return {
+    reachable: false,
+    statusCode: null,
+    latencyMs: Date.now() - start,
+    error: "Too many redirects.",
+  };
 }
 
 // ---------- ask Groq for a one-line, human summary ----------
 async function getAiSummary(url, result) {
   if (!process.env.GROQ_API_KEY) {
-    return null; // Feature degrades gracefully if the key isn't set yet.
+    return null;
   }
 
   const prompt = `A website reachability check just ran.
@@ -148,6 +197,9 @@ Latency: ${result.latencyMs}ms
 Error (if any): ${result.error ?? "none"}
 
 Write ONE short, friendly sentence (max 25 words) telling the user what this means in plain English. No markdown, no preamble.`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
 
   try {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -162,13 +214,16 @@ Write ONE short, friendly sentence (max 25 words) telling the user what this mea
         max_tokens: 60,
         temperature: 0.4,
       }),
+      signal: controller.signal,
     });
 
+    clearTimeout(timeout);
     if (!res.ok) return null;
     const data = await res.json();
-    return data.choices?.[0]?.message?.content?.trim() ?? null;
+    return data?.choices?.[0]?.message?.content?.trim() ?? null;
   } catch {
-    return null; // Never let an AI summary failure break the core feature.
+    clearTimeout(timeout);
+    return null;
   }
 }
 
@@ -176,12 +231,11 @@ module.exports = async (req, res) => {
   // ---- security headers on every response ----
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
-  res.setHeader("Referrer-Policy", "no-referrer");
-  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Cache-Control", "public, s-maxage=60, stale-while-revalidate=120");
 
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method not allowed. Use POST." });
-    return;
+  if (req.method !== "POST" && req.method !== "GET") {
+    return res.status(405).json({ error: "Method not allowed. Use GET or POST." });
   }
 
   const ip =
@@ -190,23 +244,26 @@ module.exports = async (req, res) => {
     "unknown";
 
   if (isRateLimited(ip)) {
-    res.status(429).json({ error: "Too many requests. Please wait a minute and try again." });
-    return;
+    return res.status(429).json({ error: "Too many requests. Please wait a minute and try again." });
   }
 
-  let body = req.body;
-  if (typeof body === "string") {
-    try {
-      body = JSON.parse(body);
-    } catch {
-      body = {};
+  let rawUrl = "";
+  if (req.method === "GET") {
+    rawUrl = (req.query?.url ? String(req.query.url) : "").trim();
+  } else {
+    let body = req.body;
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = {};
+      }
     }
+    rawUrl = (body && body.url ? String(body.url) : "").trim();
   }
 
-  const rawUrl = (body && body.url ? String(body.url) : "").trim();
   if (!rawUrl) {
-    res.status(400).json({ error: "Please provide a url." });
-    return;
+    return res.status(400).json({ error: "Please provide a url." });
   }
 
   // Normalize: if someone types "example.com" without a scheme, assume https.
@@ -216,16 +273,28 @@ module.exports = async (req, res) => {
   try {
     safeUrl = await assertUrlIsSafe(candidate);
   } catch (err) {
-    res.status(400).json({ error: err.message });
-    return;
+    return res.status(400).json({ error: err.message });
   }
 
-  const result = await checkReachability(safeUrl.toString());
-  const aiSummary = await getAiSummary(safeUrl.toString(), result);
+  const urlKey = safeUrl.toString();
 
-  res.status(200).json({
-    url: safeUrl.toString(),
+  // Return cached result if checked within the last 60s
+  const cached = getCached(urlKey);
+  if (cached) {
+    res.setHeader("X-Cache", "HIT");
+    return res.status(200).json(cached);
+  }
+
+  const result = await checkReachability(urlKey);
+  const aiSummary = await getAiSummary(urlKey, result);
+
+  const payload = {
+    url: urlKey,
     ...result,
     aiSummary,
-  });
+  };
+
+  setCached(urlKey, payload);
+  res.setHeader("X-Cache", "MISS");
+  return res.status(200).json(payload);
 };
